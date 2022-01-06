@@ -1,15 +1,19 @@
 # coding: utf-8
 
-import sys, os, datetime, time
+import sys, os
 import json, requests
 from subprocess import Popen, PIPE
 import re
+import time, hashlib, hmac
 
 # check env
 envApiUrl = os.environ.get('VTC_API_URL')
-envApiKey = os.environ.get('VTC_API_KEY')
-if envApiUrl == None or envApiKey == None:
-    print("This program needs env VTC_API_URL and VTC_API_KEY.")
+envApiKey = os.environ.get('VTC_API_APIKEY')
+envApiSecretKey = os.environ.get('VTC_API_SECRETKEY')
+pathKeyValues = "/service/v1/keyValues"
+keyValuesKey = os.environ.get('VTC_API_KEY')
+if envApiUrl == None or envApiKey == None or envApiSecretKey == None:
+    print("This program needs env VTC_API_URL and VTC_API_APIKEY and VTC_API_SECRETKEY.")
     sys.exit(1)
 
 # check argv
@@ -29,27 +33,41 @@ apiHeaders = {
 }
 
 
-def getState():
-    response = requests.get(envApiUrl + "/state", headers=apiHeaders)
-    data = json.loads(response.text)
-    result = None
-    if 'state' in data:
-        result = data['state']
-    return result
+def generateHeaders(method, path):
+    timestamp = str(int(time.time() * 1000))
+    text = timestamp + method + path
+    sign = hmac.new(envApiSecretKey, text, hashlib.sha256).hexdigest()
+    return {
+        'Content-Type': 'application/json',
+        'X-API-KEY': envApiKey,
+        'X-API-SIGN': sign,
+        'X-API-TIMESTAMP': timestamp
+    }
 
-def setState(state):
-    payload = {"value" : state}
-    response = requests.put(envApiUrl + "/state", headers=apiHeaders, data=json.dumps(payload))
+def getState():
+    headers = generateHeaders("GET", pathKeyValues + "/" + keyValuesKey)
+    response = requests.get(envApiUrl + pathKeyValues + "/" + keyValuesKey, headers=headers)
+    data = json.loads(response.text)
+    state = None
+    url = None
+    if 'value' in data:
+        value = json.loads(data['value'])
+        if 'state' in value:
+            state = value['state']
+        if 'url' in value:
+            url = value['url']
+    return state, url, data
+
+def setState(state, getStateData):
+    value = json.loads(getStateData['value'])
+    value['state'] = state
+    print(value)
+    payload = {"value" : json.dumps(value), "updatedAt" : getStateData["updatedAt"]}
+    print(payload)
+    headers = generateHeaders("PUT", pathKeyValues + "/" + keyValuesKey)
+    response = requests.put(envApiUrl + pathKeyValues + "/" + keyValuesKey, headers=headers, data=json.dumps(payload))
     data = json.loads(response.text)
     return data
-
-def getURL():
-    response = requests.get(envApiUrl + "/url", headers=apiHeaders)
-    data = json.loads(response.text)
-    result = ""
-    if 'url' in data:
-        result = data['url']
-    return result
 
 def getLockPID():
     cmd = "ps -aux | grep '[p]ython /home/pi/while-loop.py' | awk {'print $2'}"
@@ -119,7 +137,9 @@ def getBrowserPID(url):
     return result
 
 # check current state
-state = getState()
+getStateResult = getState()
+state = getStateResult[0]
+url = getStateResult[1]
 targetKey = None
 print(state)
 for key in dataReact:
@@ -143,7 +163,6 @@ else:
     if targetKey == "start":
         lockPID = createLock()
         print("create lock pid " + lockPID)
-        url = getURL()
         print("url is " + url)
         pattern = '[^\w:/\.\?=&]'
         result = re.search(pattern, url)
@@ -155,14 +174,13 @@ else:
         browserPID = wakeupBrowser(url)
         print("browser pid is " + browserPID)
         print("set next state " + dataReact[targetKey]["next"])
-        result = setState(dataReact[targetKey]["next"])
+        result = setState(dataReact[targetKey]["next"], getStateResult[2])
         print("setState response is ")
         print(result)
         killProcess(lockPID)
     elif targetKey == "end":
         lockPID = createLock()
         print("create lock pid " + lockPID)
-        url = getURL()
         print("url is " + url)
         browserPID = getBrowserPID(url)
         print("browser pid is " + browserPID)
@@ -171,7 +189,7 @@ else:
             killProcess(pid)
         setHDMIOff()
         print("set next state " + dataReact[targetKey]["next"])
-        result = setState(dataReact[targetKey]["next"])
+        result = setState(dataReact[targetKey]["next"], getStateResult[2])
         print("setState response is ")
         print(result)
         killProcess(lockPID)
